@@ -95,18 +95,29 @@ assert(parsedJson.platform === 'Claude' && parsedJson.messages.length === 2, 'JS
 const htmlExport = Exporter.Exporters.toHTML(mockConv);
 assert(htmlExport.content.includes('<!DOCTYPE html>') && htmlExport.content.includes('Debugging JWT Authentication'), 'HTML export creates valid standalone document');
 
-// 2.2 Claude Schema Parser Simulation (196-message API structure)
+// 2.2 Claude Schema Parser Simulation (196-message API structure + Pasted Text Attachments)
 const claudeMockData = {
   uuid: '1b157e5c-4a3f-4e2f-a76f-43d588b8a075',
   name: 'Long Claude Project Session',
   model: 'claude-3-5-sonnet-20241022',
   chat_messages: [
-    { sender: 'human', text: 'Hello Claude', created_at: '2026-10-06T18:00:00Z' },
+    {
+      sender: 'human',
+      text: '', // User only sent a pasted box without typing additional prompt text
+      attachments: [
+        {
+          file_name: 'pasted_code.py',
+          file_size: 4500,
+          extracted_content: 'def calculate_metrics():\n    return {"accuracy": 0.98}'
+        }
+      ],
+      created_at: '2026-10-06T18:00:00Z'
+    },
     {
       sender: 'assistant',
       content: [
         { type: 'thinking', thinking: 'Analyze query...' },
-        { type: 'text', text: 'Hello! How can I assist you today?' },
+        { type: 'text', text: 'Hello! I analyzed your calculate_metrics function.' },
         { type: 'tool_use', name: 'search_docs', input: { q: 'react' } }
       ],
       created_at: '2026-10-06T18:01:00Z'
@@ -114,56 +125,120 @@ const claudeMockData = {
   ]
 };
 
-// 2.3 ChatGPT DAG Mapping Tree Parser Simulation
-const chatgptMockData = {
-  title: 'ChatGPT Python Refactor',
-  current_node: 'node-3',
-  mapping: {
-    'node-1': { id: 'node-1', parent: null, children: ['node-2'], message: { author: { role: 'system' }, content: { parts: [''] } } },
-    'node-2': { id: 'node-2', parent: 'node-1', children: ['node-3'], message: { author: { role: 'user' }, content: { parts: [{ type: 'text', text: 'Refactor my script' }] } } },
-    'node-3': { id: 'node-3', parent: 'node-2', children: ['node-4'], message: { author: { role: 'assistant' }, content: { content_type: 'code', text: 'print("hello world")' }, metadata: { thought: 'Reviewing PEP8 guidelines' } } },
-    'node-4': { id: 'node-4', parent: 'node-3', children: [], message: { author: { role: 'tool', name: 'python' }, content: { content_type: 'execution_output', text: 'hello world' } } }
+// Test Claude Pasted Text Extraction
+expContext.globalThis.__UNIVERSAL_AI_CACHE__ = expContext.globalThis.__UNIVERSAL_AI_CACHE__ || { claude: {}, chatgpt: {} };
+expContext.globalThis.__UNIVERSAL_AI_CACHE__.claude['1b157e5c-4a3f-4e2f-a76f-43d588b8a075'] = claudeMockData;
+
+async function runAsyncTests() {
+  const claudeResult = await Exporter.Adapters.claude.extract();
+  assert(claudeResult && claudeResult.messages.length === 2, 'Claude extracted all messages including pure pasted text inputs');
+  assert(claudeResult.messages[0].text.includes('pasted_code.py'), 'Claude pasted text filename preserved');
+  assert(claudeResult.messages[0].text.includes('def calculate_metrics():'), 'Claude pasted text contents extracted from extracted_content');
+
+  // 2.3 ChatGPT DAG Mapping Tree Parser Simulation with Pasted Text Download
+  const testConvUuid = '67030e22-1234-5678-90ab-cdef12345678';
+  const chatgptMockData = {
+    title: 'ChatGPT Python Refactor',
+    current_node: 'node-3',
+    mapping: {
+      'node-1': { id: 'node-1', parent: null, children: ['node-2'], message: { author: { role: 'system' }, content: { parts: [''] } } },
+      'node-2': {
+        id: 'node-2',
+        parent: 'node-1',
+        children: ['node-3'],
+        message: {
+          author: { role: 'user' },
+          content: {
+            parts: [
+              {
+                content_type: 'multimodal_text',
+                asset_pointer: 'file-service://file-mock123',
+                name: 'pasted text.txt'
+              }
+            ]
+          },
+          metadata: {
+            attachments: [
+              { id: 'file-mock123', name: 'pasted text.txt', mime_type: 'text/plain' }
+            ]
+          }
+        }
+      },
+      'node-3': { id: 'node-3', parent: 'node-2', children: ['node-4'], message: { author: { role: 'assistant' }, content: { content_type: 'code', text: 'print("hello world")' }, metadata: { thought: 'Reviewing PEP8 guidelines' } } },
+      'node-4': { id: 'node-4', parent: 'node-3', children: [], message: { author: { role: 'tool', name: 'python' }, content: { content_type: 'execution_output', text: 'hello world' } } }
+    }
+  };
+
+  // Mock fetch for ChatGPT file downloading
+  expContext.fetch = async (url) => {
+    if (url.includes('/backend-api/files/file-mock123/download')) {
+      return {
+        ok: true,
+        json: async () => ({ status: 'success', download_url: 'https://files.oaiusercontent.com/mock-file-mock123' })
+      };
+    }
+    if (url === 'https://files.oaiusercontent.com/mock-file-mock123') {
+      return {
+        ok: true,
+        text: async () => 'class DataPipeline:\n    def run(self):\n        return True'
+      };
+    }
+    return { ok: false, status: 404 };
+  };
+
+  expContext.globalThis.__UNIVERSAL_AI_CACHE__.chatgpt[testConvUuid] = chatgptMockData;
+  expContext.globalThis.__UNIVERSAL_AI_CACHE__.chatgpt.latest = chatgptMockData;
+  expContext.location = { hostname: 'chatgpt.com', href: `https://chatgpt.com/c/${testConvUuid}`, origin: 'https://chatgpt.com' };
+
+  const gptResult = await Exporter.Adapters.chatgpt.extract();
+  assert(gptResult && gptResult.messages.length === 3, 'ChatGPT extracted user message with pasted text, assistant, and tool');
+  assert(gptResult.messages[0].text.includes('pasted text.txt'), 'ChatGPT pasted text attachment title preserved');
+  assert(gptResult.messages[0].text.includes('class DataPipeline:'), 'ChatGPT pasted text downloaded and embedded cleanly');
+
+  assert(Exporter.Adapters.chatgpt !== undefined, 'ChatGPT adapter is registered in Universal AI Exporter');
+  assert(Exporter.Adapters.chatgpt.matches('chatgpt.com'), 'ChatGPT adapter matches chatgpt.com');
+  assert(Exporter.Adapters.chatgpt.matches('chat.openai.com'), 'ChatGPT adapter matches chat.openai.com');
+
+  // 2.4 GLM DOM Extraction Simulation
+  assert(Exporter.Adapters.glm !== undefined, 'GLM adapter is registered in Universal AI Exporter');
+  assert(Exporter.Adapters.glm.matches('chatglm.cn'), 'GLM adapter matches chatglm.cn');
+  assert(Exporter.Adapters.glm.matches('chat.z.ai'), 'GLM adapter matches chat.z.ai');
+  assert(Exporter.Adapters.glm.matches('bigmodel.cn'), 'GLM adapter matches bigmodel.cn');
+
+  // -------------------------------------------------------------
+  // TEST 3: File Syntax & Bundle Verification
+  // -------------------------------------------------------------
+  console.log('\n📦 TEST 3: Syntax Verification of All Scripts');
+
+  const filesToValidate = [
+    'universal-snippet.js',
+    'universal-ai-exporter.user.js',
+    'extension/content.js',
+    'extension/popup.js',
+    'claude-export-snippet.js'
+  ];
+
+  for (const file of filesToValidate) {
+    try {
+      const code = fs.readFileSync(path.join(__dirname, file), 'utf8');
+      new vm.Script(code);
+      assert(true, `${file} syntax is clean and valid`);
+    } catch (err) {
+      assert(false, `${file} syntax error: ${err.message}`);
+    }
   }
-};
 
-assert(Exporter.Adapters.chatgpt !== undefined, 'ChatGPT adapter is registered in Universal AI Exporter');
-assert(Exporter.Adapters.chatgpt.matches('chatgpt.com'), 'ChatGPT adapter matches chatgpt.com');
-assert(Exporter.Adapters.chatgpt.matches('chat.openai.com'), 'ChatGPT adapter matches chat.openai.com');
+  // Summary
+  console.log(`\n========================================`);
+  console.log(`TEST RESULTS: ${testsPassed} passed, ${testsFailed} failed`);
+  console.log(`========================================\n`);
 
-// 2.4 GLM DOM Extraction Simulation
-assert(Exporter.Adapters.glm !== undefined, 'GLM adapter is registered in Universal AI Exporter');
-assert(Exporter.Adapters.glm.matches('chatglm.cn'), 'GLM adapter matches chatglm.cn');
-assert(Exporter.Adapters.glm.matches('chat.z.ai'), 'GLM adapter matches chat.z.ai');
-assert(Exporter.Adapters.glm.matches('bigmodel.cn'), 'GLM adapter matches bigmodel.cn');
-
-// -------------------------------------------------------------
-// TEST 3: File Syntax & Bundle Verification
-// -------------------------------------------------------------
-console.log('\n📦 TEST 3: Syntax Verification of All Scripts');
-
-const filesToValidate = [
-  'universal-snippet.js',
-  'universal-ai-exporter.user.js',
-  'extension/content.js',
-  'extension/popup.js',
-  'claude-export-snippet.js'
-];
-
-for (const file of filesToValidate) {
-  try {
-    const code = fs.readFileSync(path.join(__dirname, file), 'utf8');
-    new vm.Script(code);
-    assert(true, `${file} syntax is clean and valid`);
-  } catch (err) {
-    assert(false, `${file} syntax error: ${err.message}`);
+  if (testsFailed > 0) {
+    process.exit(1);
   }
 }
 
-// Summary
-console.log(`\n========================================`);
-console.log(`TEST RESULTS: ${testsPassed} passed, ${testsFailed} failed`);
-console.log(`========================================\n`);
-
-if (testsFailed > 0) {
+runAsyncTests().catch(err => {
+  console.error('Fatal test error:', err);
   process.exit(1);
-}
+});

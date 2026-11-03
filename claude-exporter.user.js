@@ -80,10 +80,11 @@
 
   function extractMessageText(message) {
     if (!message) return '';
-    if (typeof message.text === 'string' && message.text.trim()) return message.text;
-    if (typeof message.content === 'string' && message.content.trim()) return message.content;
-    if (Array.isArray(message.content)) {
-      return message.content.map(block => {
+    let mainText = '';
+    if (typeof message.text === 'string' && message.text.trim()) mainText = message.text;
+    else if (typeof message.content === 'string' && message.content.trim()) mainText = message.content;
+    else if (Array.isArray(message.content)) {
+      mainText = message.content.map(block => {
         if (!block) return '';
         if (typeof block === 'string') return block;
         if (typeof block.text === 'string') return block.text;
@@ -95,10 +96,32 @@
           const val = typeof block.content === 'string' ? block.content : JSON.stringify(block.content, null, 2);
           return `> 📋 **Tool Result:**\n\`\`\`\n${val}\n\`\`\``;
         }
+        if (block.type === 'document' || block.type === 'attachment') {
+          const docContent = block.source?.data || block.extracted_content || block.text || block.content || '';
+          const docName = block.title || block.file_name || block.name || 'Pasted document';
+          if (docContent && typeof docContent === 'string' && docContent.trim()) {
+            return `📎 **[${docName}]:**\n\`\`\`\n${docContent.trim()}\n\`\`\``;
+          }
+        }
         return '';
       }).filter(Boolean).join('\n\n');
     }
-    return '';
+
+    const attParts = [];
+    const allAtts = [...(message.attachments || []), ...(message.files || [])];
+    for (const att of allAtts) {
+      if (!att) continue;
+      const content = att.extracted_content || att.content || att.text || '';
+      const name = att.file_name || att.name || 'Pasted text';
+      if (content && typeof content === 'string' && content.trim()) {
+        attParts.push(`📎 **[${name}]:**\n\`\`\`\n${content.trim()}\n\`\`\``);
+      }
+    }
+
+    if (attParts.length > 0) {
+      return mainText ? `${mainText}\n\n${attParts.join('\n\n')}` : attParts.join('\n\n');
+    }
+    return mainText;
   }
 
   function getSender(msg) {

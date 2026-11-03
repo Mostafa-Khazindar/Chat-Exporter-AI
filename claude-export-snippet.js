@@ -57,19 +57,42 @@
     }
 
     function extractText(m) {
-      if (typeof m.text === "string" && m.text.trim()) return m.text;
-      if (typeof m.content === "string" && m.content.trim()) return m.content;
-      if (Array.isArray(m.content)) {
-        return m.content.map(b => {
+      let mainText = "";
+      if (typeof m.text === "string" && m.text.trim()) mainText = m.text.trim();
+      else if (typeof m.content === "string" && m.content.trim()) mainText = m.content.trim();
+      else if (Array.isArray(m.content)) {
+        mainText = m.content.map(b => {
           if (!b) return "";
           if (typeof b === "string") return b;
           if (typeof b.text === "string") return b.text;
           if (b.type === "tool_use" || b.name) return `> 🛠 **Tool: ${b.name}**\n\`\`\`json\n${JSON.stringify(b.input, null, 2)}\n\`\`\``;
           if (b.type === "tool_result") return `> 📋 **Result:**\n\`\`\`\n${typeof b.content === "string" ? b.content : JSON.stringify(b.content, null, 2)}\n\`\`\``;
+          if (b.type === "document" || b.type === "attachment") {
+            const docContent = b.source?.data || b.extracted_content || b.text || b.content || "";
+            const docName = b.title || b.file_name || b.name || "Pasted document";
+            if (docContent && typeof docContent === "string" && docContent.trim()) {
+              return `📎 **[${docName}]:**\n\`\`\`\n${docContent.trim()}\n\`\`\``;
+            }
+          }
           return "";
         }).filter(Boolean).join("\n\n");
       }
-      return "";
+
+      const attParts = [];
+      const allAtts = [...(m.attachments || []), ...(m.files || [])];
+      for (const att of allAtts) {
+        if (!att) continue;
+        const content = att.extracted_content || att.content || att.text || "";
+        const name = att.file_name || att.name || "Pasted text";
+        if (content && typeof content === "string" && content.trim()) {
+          attParts.push(`📎 **[${name}]:**\n\`\`\`\n${content.trim()}\n\`\`\``);
+        }
+      }
+
+      if (attParts.length > 0) {
+        return mainText ? `${mainText}\n\n${attParts.join("\n\n")}` : attParts.join("\n\n");
+      }
+      return mainText;
     }
 
     function getSender(m) {

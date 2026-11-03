@@ -167,18 +167,13 @@
   function extractMessageText(message) {
     if (!message) return '';
 
+    let mainText = '';
     // Direct text string
     if (typeof message.text === 'string' && message.text.trim()) {
-      return message.text;
-    }
-
-    // Content as string
-    if (typeof message.content === 'string' && message.content.trim()) {
-      return message.content;
-    }
-
-    // Array of content blocks
-    if (Array.isArray(message.content)) {
+      mainText = message.text;
+    } else if (typeof message.content === 'string' && message.content.trim()) {
+      mainText = message.content;
+    } else if (Array.isArray(message.content)) {
       const parts = [];
       for (const block of message.content) {
         if (!block) continue;
@@ -198,12 +193,34 @@
         } else if (block.type === 'tool_result') {
           const resultText = typeof block.content === 'string' ? block.content : JSON.stringify(block.content, null, 2);
           parts.push(`> 📋 **Tool Result:**\n\`\`\`\n${resultText}\n\`\`\``);
+        } else if (block.type === 'document' || block.type === 'attachment') {
+          const docContent = block.source?.data || block.extracted_content || block.text || block.content || '';
+          const docName = block.title || block.file_name || block.name || 'Pasted document';
+          if (docContent && typeof docContent === 'string' && docContent.trim()) {
+            parts.push(`📎 **[${docName}]:**\n\`\`\`\n${docContent.trim()}\n\`\`\``);
+          }
         }
       }
-      if (parts.length > 0) return parts.join('\n\n');
+      if (parts.length > 0) mainText = parts.join('\n\n');
     }
 
-    return '';
+    // Claude attachments & files (where Claude stores pasted text blocks & uploaded files)
+    const attParts = [];
+    const allAtts = [...(message.attachments || []), ...(message.files || [])];
+    for (const att of allAtts) {
+      if (!att) continue;
+      const content = att.extracted_content || att.content || att.text || '';
+      const name = att.file_name || att.name || 'Pasted text';
+      if (content && typeof content === 'string' && content.trim()) {
+        attParts.push(`📎 **[${name}]:**\n\`\`\`\n${content.trim()}\n\`\`\``);
+      }
+    }
+
+    if (attParts.length > 0) {
+      return mainText ? `${mainText}\n\n${attParts.join('\n\n')}` : attParts.join('\n\n');
+    }
+
+    return mainText;
   }
 
   /**

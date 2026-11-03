@@ -132,15 +132,44 @@
         const msgs = (data.chat_messages || data.messages).map(m => {
           let text = m.text || '';
           let thoughts = '';
+          const attParts = [];
+
           if (Array.isArray(m.content)) {
-            text = m.content.map(b => {
-              if (typeof b === 'string') return b;
-              if (b.type === 'thinking') { thoughts += (b.thinking || '') + '\n'; return ''; }
-              if (b.type === 'text') return b.text || '';
-              if (b.type === 'tool_use') return `> 🛠 **Tool (${b.name}):** \`${JSON.stringify(b.input)}\``;
-              return '';
-            }).filter(Boolean).join('\n\n');
+            const parts = [];
+            for (const b of m.content) {
+              if (!b) continue;
+              if (typeof b === 'string') parts.push(b);
+              else if (b.type === 'thinking') thoughts += (b.thinking || '') + '\n';
+              else if (b.type === 'text') { if (b.text) parts.push(b.text); }
+              else if (b.type === 'tool_use' || b.name) parts.push(`> 🛠 **Tool (${b.name}):** \`${JSON.stringify(b.input)}\``);
+              else if (b.type === 'tool_result') parts.push(`> 📋 **Tool Result:**\n\`\`\`\n${typeof b.content === 'string' ? b.content : JSON.stringify(b.content, null, 2)}\n\`\`\``);
+              else if (b.type === 'document' || b.type === 'attachment') {
+                const docContent = b.source?.data || b.extracted_content || b.text || b.content || '';
+                const docName = b.title || b.file_name || b.name || 'Pasted document';
+                if (docContent && typeof docContent === 'string' && docContent.trim()) {
+                  attParts.push(`📎 **[${docName}]:**\n\`\`\`\n${docContent.trim()}\n\`\`\``);
+                }
+              }
+            }
+            const joined = parts.filter(Boolean).join('\n\n');
+            if (joined) text = joined;
           }
+
+          // Claude attachments & files (where Claude stores pasted text blocks & uploaded files)
+          const allAtts = [...(m.attachments || []), ...(m.files || [])];
+          for (const att of allAtts) {
+            if (!att) continue;
+            const content = att.extracted_content || att.content || att.text || '';
+            const name = att.file_name || att.name || 'Pasted text';
+            if (content && typeof content === 'string' && content.trim()) {
+              attParts.push(`📎 **[${name}]:**\n\`\`\`\n${content.trim()}\n\`\`\``);
+            }
+          }
+
+          if (attParts.length > 0) {
+            text = text ? `${text}\n\n${attParts.join('\n\n')}` : attParts.join('\n\n');
+          }
+
           return {
             role: (m.sender === 'human' || m.sender === 'user') ? 'user' : 'assistant',
             sender: (m.sender === 'human' || m.sender === 'user') ? 'User' : 'Claude',
@@ -230,10 +259,54 @@
         }
       }
 
+      function isTextAttachment(name, mimeType) {
+        const n = (name || '').toLowerCase();
+        const m = (mimeType || '').toLowerCase();
+        if (m.startsWith('text/')) return true;
+        if (m.includes('json') || m.includes('javascript') || m.includes('xml') || m.includes('csv')) return true;
+        if (n.includes('pasted') || n.includes('paste') || n.includes('untitled')) return true;
+        const textExts = [
+          '.txt', '.md', '.markdown', '.json', '.csv', '.tsv', '.xml', '.html', '.htm',
+          '.css', '.scss', '.sass', '.js', '.jsx', '.ts', '.tsx', '.py', '.pyw',
+          '.java', '.c', '.h', '.cpp', '.hpp', '.cs', '.go', '.rs', '.php', '.rb',
+          '.swift', '.kt', '.kts', '.sh', '.bash', '.zsh', '.bat', '.cmd', '.ps1',
+          '.sql', '.r', '.m', '.lua', '.yaml', '.yml', '.toml', '.ini', '.conf',
+          '.env', '.log', '.diff', '.patch', '.tex', '.dockerfile'
+        ];
+        return textExts.some(ext => n.endsWith(ext));
+      }
+
+      const fileCache = new Map();
+      async function fetchChatGptFile(fileId) {
+        if (!fileId || typeof fileId !== 'string') return null;
+        if (fileCache.has(fileId)) return fileCache.get(fileId);
+        try {
+          const origin = (typeof location !== 'undefined' && location.origin) ? location.origin : 'https://chatgpt.com';
+          const res = await fetch(`${origin}/backend-api/files/${fileId}/download`, {
+            credentials: 'include',
+            headers: authHeaders
+          });
+          if (res.ok) {
+            const fileData = await res.json();
+            if (fileData && fileData.download_url) {
+              const textRes = await fetch(fileData.download_url);
+              if (textRes.ok) {
+                const content = await textRes.text();
+                fileCache.set(fileId, content);
+                return content;
+              }
+            }
+          }
+        } catch (_) {}
+        fileCache.set(fileId, null);
+        return null;
+      }
+
       function extractChatGptMessageContent(msg) {
         if (!msg || !msg.content) return '';
         const c = msg.content;
         const parts = [];
+        const handledFiles = new Set();
 
         if (typeof c.text === 'string' && c.text.trim()) {
           parts.push(c.text.trim());
@@ -245,7 +318,25 @@
             if (typeof p === 'string') {
               if (p.trim()) parts.push(p.trim());
             } else if (typeof p === 'object') {
-              if (typeof p.text === 'string' && p.text.trim()) {
+              let fileId = null;
+              if (typeof p.asset_pointer === 'string' && p.asset_pointer.startsWith('file-service://')) {
+                fileId = p.asset_pointer.replace('file-service://', '');
+              } else if (typeof p.id === 'string' && p.id.startsWith('file-')) {
+                fileId = p.id;
+              }
+
+              if (fileId) {
+                handledFiles.add(fileId);
+                const name = p.name || 'Pasted text';
+                const cached = fileCache.get(fileId);
+                if (cached && typeof cached === 'string') {
+                  parts.push(`📎 **[${name}]:**\n\`\`\`\n${cached.trim()}\n\`\`\``);
+                } else if (p.content_type === 'image_asset_pointer') {
+                  parts.push(`[Image Attachment: ${name}]`);
+                } else {
+                  parts.push(`📎 **[Attachment: ${name}]**`);
+                }
+              } else if (typeof p.text === 'string' && p.text.trim()) {
                 parts.push(p.text.trim());
               } else if (typeof p.content === 'string' && p.content.trim()) {
                 parts.push(p.content.trim());
@@ -256,6 +347,23 @@
               } else if (p.type === 'text' && typeof p.text === 'string') {
                 parts.push(p.text.trim());
               }
+            }
+          }
+        }
+
+        // Include any metadata attachments not already listed in parts
+        if (Array.isArray(msg.metadata?.attachments)) {
+          for (const att of msg.metadata.attachments) {
+            if (!att || !att.id || handledFiles.has(att.id)) continue;
+            handledFiles.add(att.id);
+            const name = att.name || 'Pasted text';
+            const cached = fileCache.get(att.id);
+            if (cached && typeof cached === 'string') {
+              parts.push(`📎 **[${name}]:**\n\`\`\`\n${cached.trim()}\n\`\`\``);
+            } else if (att.mime_type && att.mime_type.startsWith('image/')) {
+              parts.push(`[Image Attachment: ${name}]`);
+            } else {
+              parts.push(`📎 **[Attachment: ${name}]**`);
             }
           }
         }
@@ -292,6 +400,39 @@
           visited.add(curr);
           nodes.unshift(data.mapping[curr]);
           curr = data.mapping[curr].parent;
+        }
+
+        // Pre-fetch all text attachments / pasted text files in parallel
+        const filesToFetch = [];
+        for (const n of nodes) {
+          const msg = n.message;
+          if (!msg) continue;
+          if (Array.isArray(msg.metadata?.attachments)) {
+            for (const att of msg.metadata.attachments) {
+              if (att && att.id && isTextAttachment(att.name, att.mime_type)) {
+                filesToFetch.push(att.id);
+              }
+            }
+          }
+          if (Array.isArray(msg.content?.parts)) {
+            for (const p of msg.content.parts) {
+              if (p && typeof p === 'object') {
+                let fid = null;
+                if (typeof p.asset_pointer === 'string' && p.asset_pointer.startsWith('file-service://')) {
+                  fid = p.asset_pointer.replace('file-service://', '');
+                } else if (typeof p.id === 'string' && p.id.startsWith('file-')) {
+                  fid = p.id;
+                }
+                if (fid && isTextAttachment(p.name, p.content_type || p.mime_type)) {
+                  filesToFetch.push(fid);
+                }
+              }
+            }
+          }
+        }
+
+        if (filesToFetch.length > 0 && typeof fetch === 'function') {
+          await Promise.all(filesToFetch.map(fid => fetchChatGptFile(fid)));
         }
 
         const msgs = nodes.map(n => {
