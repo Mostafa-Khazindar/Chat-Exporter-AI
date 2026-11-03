@@ -263,40 +263,153 @@
     // ------------------------------------------
     chatgpt: {
       name: 'ChatGPT',
-      matches: () => location.hostname.includes('chatgpt.com') || location.hostname.includes('chat.openai.com'),
+      matches: (h) => {
+        const host = h || (typeof location !== 'undefined' ? location.hostname : '');
+        return host.includes('chatgpt.com') || host.includes('chat.openai.com');
+      },
       async extract() {
-        const convMatch = location.href.match(/\/c\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
-        const convId = convMatch ? convMatch[1] : null;
+        // Step A: Resolve Auth Token & Account ID
+        let authToken = null;
+        let accountId = null;
+        try {
+          const nextData = typeof window !== 'undefined' ? window.__NEXT_DATA__ : null;
+          authToken = nextData?.props?.pageProps?.session?.accessToken ||
+                      nextData?.props?.pageProps?.accessToken ||
+                      nextData?.props?.session?.accessToken;
+          accountId = nextData?.props?.pageProps?.session?.account?.id ||
+                      nextData?.props?.pageProps?.account?.id;
+        } catch (_) {}
+
+        if (!authToken && typeof fetch === 'function') {
+          try {
+            const sessRes = await fetch('/api/auth/session', { credentials: 'include' });
+            if (sessRes.ok) {
+              const sessData = await sessRes.json();
+              authToken = sessData?.accessToken || null;
+              accountId = sessData?.account?.id || null;
+            }
+          } catch (_) {}
+        }
+
+        const authHeaders = { 'Accept': 'application/json' };
+        if (authToken) authHeaders['Authorization'] = `Bearer ${authToken}`;
+        if (accountId) authHeaders['chatgpt-account-id'] = accountId;
+
+        // Step B: Resolve Conversation ID
+        let convId = (typeof location !== 'undefined')
+          ? location.href.match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i)?.[0]
+          : null;
+
+        if (!convId && typeof performance !== 'undefined') {
+          const entries = performance.getEntriesByType('resource');
+          for (let i = entries.length - 1; i >= 0; i--) {
+            const m = entries[i].name.match(/conversation\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
+            if (m) { convId = m[1]; break; }
+          }
+        }
+
+        if (!convId && authToken && typeof location !== 'undefined') {
+          try {
+            const listRes = await fetch(`${location.origin}/backend-api/conversations?offset=0&limit=3&order=updated`, {
+              credentials: 'include',
+              headers: authHeaders
+            });
+            if (listRes.ok) {
+              const listJson = await listRes.json();
+              if (listJson?.items?.[0]?.id) convId = listJson.items[0].id;
+            }
+          } catch (_) {}
+        }
 
         // Tier 1: Check In-Memory Cache
-        let data = (convId && global.__UNIVERSAL_AI_CACHE__.chatgpt[convId]) || global.__UNIVERSAL_AI_CACHE__.chatgpt.latest;
+        let data = (convId && global.__UNIVERSAL_AI_CACHE__?.chatgpt?.[convId]) || global.__UNIVERSAL_AI_CACHE__?.chatgpt?.latest;
 
-        // Tier 2: Check Performance Resource Sniffer
+        // Tier 2: Fetch via synthetic internal endpoint
+        if (!data && convId && typeof location !== 'undefined') {
+          const isShare = location.pathname.includes('/share/');
+          const endpoint = `${location.origin}/backend-api/${isShare ? 'share' : 'conversation'}/${convId}`;
+          try {
+            const res = await fetch(endpoint, { credentials: 'include', headers: authHeaders });
+            if (res.ok) data = await res.json();
+          } catch (_) {}
+        }
+
+        // Tier 3: Check Performance Resource Sniffer
         if (!data && typeof performance !== 'undefined') {
           const entries = performance.getEntriesByType('resource').map(e => e.name);
-          const matchUrl = entries.reverse().find(u => u.includes('/backend-api/conversation/') && (convId ? u.includes(convId) : true));
+          const matchUrl = entries.reverse().find(u => u.includes('/backend-api/conversation/') || (convId && u.includes(convId)));
           if (matchUrl) {
             try {
-              const res = await fetch(matchUrl, { credentials: 'include' });
+              const res = await fetch(matchUrl, { credentials: 'include', headers: authHeaders });
               if (res.ok) data = await res.json();
             } catch (_) {}
           }
         }
 
-        // Tier 3: Synthetic Endpoint
-        if (!data && convId) {
-          try {
-            const res = await fetch(`${location.origin}/backend-api/conversation/${convId}`, { credentials: 'include' });
-            if (res.ok) data = await res.json();
-          } catch (_) {}
+        // Helper: Extract rich message content
+        function extractChatGptMessageContent(msg) {
+          if (!msg || !msg.content) return '';
+          const c = msg.content;
+          const parts = [];
+
+          if (typeof c.text === 'string' && c.text.trim()) {
+            parts.push(c.text.trim());
+          }
+
+          if (Array.isArray(c.parts)) {
+            for (const p of c.parts) {
+              if (!p) continue;
+              if (typeof p === 'string') {
+                if (p.trim()) parts.push(p.trim());
+              } else if (typeof p === 'object') {
+                if (typeof p.text === 'string' && p.text.trim()) {
+                  parts.push(p.text.trim());
+                } else if (typeof p.content === 'string' && p.content.trim()) {
+                  parts.push(p.content.trim());
+                } else if (p.content_type === 'image_asset_pointer' || p.asset_pointer) {
+                  parts.push('[Image Attachment]');
+                } else if (p.content_type === 'audio_asset_pointer') {
+                  parts.push('[Audio Clip]');
+                } else if (p.type === 'text' && typeof p.text === 'string') {
+                  parts.push(p.text.trim());
+                }
+              }
+            }
+          }
+
+          if (c.content_type === 'code' && typeof c.text === 'string') {
+            parts.push('```python\n' + c.text.trim() + '\n```');
+          } else if (c.content_type === 'execution_output' && typeof c.text === 'string') {
+            parts.push('> 📋 **Output:**\n```\n' + c.text.trim() + '\n```');
+          } else if (c.content_type === 'tether_browsing_display' || c.content_type === 'tether_quote') {
+            if (c.result) parts.push('> 🔍 ' + c.result);
+          }
+
+          return parts.join('\n\n');
         }
 
         // Normalize ChatGPT mapping tree
         if (data && data.mapping) {
           const mapping = data.mapping;
           let curr = data.current_node;
+
+          // Find deepest active leaf node
+          if (!curr || !mapping[curr]) {
+            const allNodes = Object.values(mapping);
+            const leaves = allNodes.filter(n => !n.children || n.children.length === 0);
+            leaves.sort((a, b) => ((b.message?.create_time || 0) - (a.message?.create_time || 0)));
+            if (leaves.length > 0) curr = leaves[0].id;
+          }
+
+          while (mapping[curr] && Array.isArray(mapping[curr].children) && mapping[curr].children.length > 0) {
+            const children = mapping[curr].children;
+            curr = children[children.length - 1];
+          }
+
           const linearNodes = [];
-          while (curr && mapping[curr]) {
+          const visited = new Set();
+          while (curr && mapping[curr] && !visited.has(curr)) {
+            visited.add(curr);
             linearNodes.unshift(mapping[curr]);
             curr = mapping[curr].parent;
           }
@@ -305,22 +418,24 @@
           for (const node of linearNodes) {
             const msg = node.message;
             if (!msg || !msg.author || msg.author.role === 'system') continue;
-            const isUser = msg.author.role === 'user';
-            let text = '';
-            if (msg.content && Array.isArray(msg.content.parts)) {
-              text = msg.content.parts.filter(p => typeof p === 'string').join('\n\n');
-            } else if (msg.content && typeof msg.content.text === 'string') {
-              text = msg.content.text;
-            }
 
-            const thoughts = msg.metadata?.thought || '';
+            const isUser = msg.author.role === 'user';
+            const isTool = msg.author.role === 'tool';
+            let sender = 'ChatGPT';
+            if (isUser) sender = 'User';
+            else if (isTool) sender = msg.author.name ? `Tool (${msg.author.name})` : 'Tool';
+            else if (msg.author.name) sender = msg.author.name;
+
+            const text = extractChatGptMessageContent(msg);
+            const thoughts = cleanText(msg.metadata?.thought || msg.metadata?.reasoning || msg.metadata?.reasoning_content || '');
+
             if (text || thoughts) {
               messages.push({
                 index: messages.length,
                 role: isUser ? 'user' : 'assistant',
-                sender: isUser ? 'User' : 'ChatGPT',
+                sender: sender,
                 text: cleanText(text),
-                thoughts: cleanText(thoughts),
+                thoughts: thoughts,
                 timestamp: msg.create_time ? msg.create_time * 1000 : null
               });
             }
@@ -328,7 +443,7 @@
 
           return {
             platform: 'ChatGPT',
-            title: data.title || cleanText(document.title.replace(' - ChatGPT', '')) || 'ChatGPT Conversation',
+            title: data.title || (typeof document !== 'undefined' ? cleanText(document.title.replace(' - ChatGPT', '')) : 'ChatGPT Conversation') || 'ChatGPT Conversation',
             id: data.conversation_id || convId,
             model: data.model_slug || 'GPT',
             created_at: data.create_time ? new Date(data.create_time * 1000).toISOString() : null,

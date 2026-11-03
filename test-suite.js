@@ -119,11 +119,16 @@ const chatgptMockData = {
   title: 'ChatGPT Python Refactor',
   current_node: 'node-3',
   mapping: {
-    'node-1': { id: 'node-1', parent: null, message: { author: { role: 'system' }, content: { parts: [''] } } },
-    'node-2': { id: 'node-2', parent: 'node-1', message: { author: { role: 'user' }, content: { parts: ['Refactor my script'] } } },
-    'node-3': { id: 'node-3', parent: 'node-2', message: { author: { role: 'assistant' }, content: { parts: ['Here is the clean refactor:'] }, metadata: { thought: 'Reviewing PEP8 guidelines' } } }
+    'node-1': { id: 'node-1', parent: null, children: ['node-2'], message: { author: { role: 'system' }, content: { parts: [''] } } },
+    'node-2': { id: 'node-2', parent: 'node-1', children: ['node-3'], message: { author: { role: 'user' }, content: { parts: [{ type: 'text', text: 'Refactor my script' }] } } },
+    'node-3': { id: 'node-3', parent: 'node-2', children: ['node-4'], message: { author: { role: 'assistant' }, content: { content_type: 'code', text: 'print("hello world")' }, metadata: { thought: 'Reviewing PEP8 guidelines' } } },
+    'node-4': { id: 'node-4', parent: 'node-3', children: [], message: { author: { role: 'tool', name: 'python' }, content: { content_type: 'execution_output', text: 'hello world' } } }
   }
 };
+
+assert(Exporter.Adapters.chatgpt !== undefined, 'ChatGPT adapter is registered in Universal AI Exporter');
+assert(Exporter.Adapters.chatgpt.matches('chatgpt.com'), 'ChatGPT adapter matches chatgpt.com');
+assert(Exporter.Adapters.chatgpt.matches('chat.openai.com'), 'ChatGPT adapter matches chat.openai.com');
 
 // 2.4 GLM DOM Extraction Simulation
 assert(Exporter.Adapters.glm !== undefined, 'GLM adapter is registered in Universal AI Exporter');

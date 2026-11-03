@@ -93,43 +93,176 @@
     }
   }
 
-  // 2. CHATGPT (Backend Tree Re-fetch + Synthetic Endpoint)
+  // 2. CHATGPT (Backend Tree Re-fetch + Auth Session Token + DAG Traversal)
   else if (host.includes("chatgpt.com") || host.includes("chat.openai.com")) {
     conv.platform = "ChatGPT";
-    const convMatch = location.href.match(/\/c\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
-    const convId = convMatch ? convMatch[1] : null;
-    let raw = null;
-    if (typeof performance !== "undefined") {
-      const match = performance.getEntriesByType("resource").map(e => e.name).reverse().find(u => u.includes("/backend-api/conversation/"));
-      if (match) {
-        try { const r = await fetch(match, { credentials: "include" }); if (r.ok) raw = await r.json(); } catch (_) {}
+
+    // Step A: Resolve Auth Token & Account ID
+    let authToken = null;
+    let accountId = null;
+    try {
+      const nextData = window.__NEXT_DATA__;
+      authToken = nextData?.props?.pageProps?.session?.accessToken ||
+                  nextData?.props?.pageProps?.accessToken ||
+                  nextData?.props?.session?.accessToken;
+      accountId = nextData?.props?.pageProps?.session?.account?.id ||
+                  nextData?.props?.pageProps?.account?.id;
+    } catch (_) {}
+
+    if (!authToken) {
+      try {
+        const sessRes = await fetch("/api/auth/session", { credentials: "include" });
+        if (sessRes.ok) {
+          const sessData = await sessRes.json();
+          authToken = sessData?.accessToken || null;
+          accountId = sessData?.account?.id || null;
+        }
+      } catch (_) {}
+    }
+
+    const authHeaders = { "Accept": "application/json" };
+    if (authToken) authHeaders["Authorization"] = `Bearer ${authToken}`;
+    if (accountId) authHeaders["chatgpt-account-id"] = accountId;
+
+    // Step B: Resolve Conversation ID
+    let convId = location.href.match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i)?.[0];
+    if (!convId && typeof performance !== "undefined") {
+      const entries = performance.getEntriesByType("resource");
+      for (let i = entries.length - 1; i >= 0; i--) {
+        const m = entries[i].name.match(/conversation\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
+        if (m) { convId = m[1]; break; }
       }
     }
-    if (!raw && convId) {
+
+    // Fallback: If on root or fresh chat, query recent conversation ID
+    if (!convId && authToken) {
       try {
-        const r = await fetch(`${location.origin}/backend-api/conversation/${convId}`, { credentials: "include" });
+        const listRes = await fetch(`${location.origin}/backend-api/conversations?offset=0&limit=3&order=updated`, {
+          credentials: "include",
+          headers: authHeaders
+        });
+        if (listRes.ok) {
+          const listJson = await listRes.json();
+          if (listJson?.items?.[0]?.id) convId = listJson.items[0].id;
+        }
+      } catch (_) {}
+    }
+
+    // Step C: Fetch full conversation tree from internal API
+    let raw = null;
+    const isShare = location.pathname.includes("/share/");
+    const endpoint = convId
+      ? `${location.origin}/backend-api/${isShare ? "share" : "conversation"}/${convId}`
+      : null;
+
+    if (endpoint) {
+      try {
+        const r = await fetch(endpoint, { credentials: "include", headers: authHeaders });
         if (r.ok) raw = await r.json();
       } catch (_) {}
     }
+
+    if (!raw && typeof performance !== "undefined") {
+      const match = performance.getEntriesByType("resource").map(e => e.name).reverse().find(u => u.includes("/backend-api/conversation/") || (convId && u.includes(convId)));
+      if (match) {
+        try {
+          const r = await fetch(match, { credentials: "include", headers: authHeaders });
+          if (r.ok) raw = await r.json();
+        } catch (_) {}
+      }
+    }
+
+    // Step D: Extract full DAG history down to deepest leaf
     if (raw && raw.mapping) {
       conv.title = raw.title || conv.title;
       let curr = raw.current_node;
+
+      // Find deepest active leaf node
+      if (!curr || !raw.mapping[curr]) {
+        const allNodes = Object.values(raw.mapping);
+        const leaves = allNodes.filter(n => !n.children || n.children.length === 0);
+        leaves.sort((a, b) => ((b.message?.create_time || 0) - (a.message?.create_time || 0)));
+        if (leaves.length > 0) curr = leaves[0].id;
+      }
+
+      while (raw.mapping[curr] && Array.isArray(raw.mapping[curr].children) && raw.mapping[curr].children.length > 0) {
+        const children = raw.mapping[curr].children;
+        curr = children[children.length - 1];
+      }
+
       const nodes = [];
-      while (curr && raw.mapping[curr]) {
+      const visited = new Set();
+      while (curr && raw.mapping[curr] && !visited.has(curr)) {
+        visited.add(curr);
         nodes.unshift(raw.mapping[curr]);
         curr = raw.mapping[curr].parent;
       }
+
+      function extractChatGptMessageContent(msg) {
+        if (!msg || !msg.content) return "";
+        const c = msg.content;
+        const parts = [];
+
+        if (typeof c.text === "string" && c.text.trim()) {
+          parts.push(c.text.trim());
+        }
+
+        if (Array.isArray(c.parts)) {
+          for (const p of c.parts) {
+            if (!p) continue;
+            if (typeof p === "string") {
+              if (p.trim()) parts.push(p.trim());
+            } else if (typeof p === "object") {
+              if (typeof p.text === "string" && p.text.trim()) {
+                parts.push(p.text.trim());
+              } else if (typeof p.content === "string" && p.content.trim()) {
+                parts.push(p.content.trim());
+              } else if (p.content_type === "image_asset_pointer" || p.asset_pointer) {
+                parts.push("[Image Attachment]");
+              } else if (p.content_type === "audio_asset_pointer") {
+                parts.push("[Audio Clip]");
+              } else if (p.type === "text" && typeof p.text === "string") {
+                parts.push(p.text.trim());
+              }
+            }
+          }
+        }
+
+        if (c.content_type === "code" && typeof c.text === "string") {
+          parts.push("```python\n" + c.text.trim() + "\n```");
+        } else if (c.content_type === "execution_output" && typeof c.text === "string") {
+          parts.push("> 📋 **Output:**\n```\n" + c.text.trim() + "\n```");
+        } else if (c.content_type === "tether_browsing_display" || c.content_type === "tether_quote") {
+          if (c.result) parts.push("> 🔍 " + c.result);
+        }
+
+        return parts.join("\n\n");
+      }
+
       conv.messages = nodes.map(n => {
         const msg = n.message;
         if (!msg || !msg.author || msg.author.role === "system") return null;
-        const text = msg.content?.parts ? msg.content.parts.filter(p => typeof p === "string").join("\n\n") : (msg.content?.text || "");
+
+        const isUser = msg.author.role === "user";
+        const isTool = msg.author.role === "tool";
+        let sender = "ChatGPT";
+        if (isUser) sender = "User";
+        else if (isTool) sender = msg.author.name ? `Tool (${msg.author.name})` : "Tool";
+        else if (msg.author.name) sender = msg.author.name;
+
+        const text = extractChatGptMessageContent(msg);
+        const thoughts = clean(msg.metadata?.thought || msg.metadata?.reasoning || msg.metadata?.reasoning_content || "");
+
+        if (!text && !thoughts) return null;
+
         return {
-          role: msg.author.role === "user" ? "user" : "assistant",
-          sender: msg.author.role === "user" ? "User" : "ChatGPT",
+          role: isUser ? "user" : "assistant",
+          sender: sender,
           text: clean(text),
-          thoughts: clean(msg.metadata?.thought || "")
+          thoughts: thoughts,
+          timestamp: msg.create_time ? msg.create_time * 1000 : null
         };
-      }).filter(Boolean).filter(m => m.text || m.thoughts);
+      }).filter(Boolean);
     }
   }
 
