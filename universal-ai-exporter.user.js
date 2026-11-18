@@ -509,58 +509,6 @@
 
     // 5. GOOGLE AI STUDIO (aistudio.google.com)
     if (host.includes('aistudio.google.com')) {
-      // Check Raw Mode (ms-chunk-editor) first
-      const chunkEditor = document.querySelector('ms-chunk-editor');
-      if (chunkEditor && chunkEditor.innerText && chunkEditor.innerText.length > 500) {
-        const rawLines = cleanText(chunkEditor.innerText).split('\n');
-        const rawMsgs = [];
-        let currentRole = 'user';
-        let currentBuffer = [];
-        let currentThoughts = '';
-
-        for (const line of rawLines) {
-          if (/^(user|human)\b/i.test(line.trim()) || line.trim().startsWith('User ')) {
-            if (currentBuffer.length > 0 || currentThoughts) {
-              rawMsgs.push({
-                role: currentRole,
-                sender: currentRole === 'user' ? 'User' : 'Gemini',
-                text: cleanText(currentBuffer.join('\n')),
-                thoughts: cleanText(currentThoughts)
-              });
-              currentBuffer = [];
-              currentThoughts = '';
-            }
-            currentRole = 'user';
-          } else if (/^(model|gemini|assistant)\b/i.test(line.trim()) || line.trim().startsWith('Model ')) {
-            if (currentBuffer.length > 0 || currentThoughts) {
-              rawMsgs.push({
-                role: currentRole,
-                sender: currentRole === 'user' ? 'User' : 'Gemini',
-                text: cleanText(currentBuffer.join('\n')),
-                thoughts: cleanText(currentThoughts)
-              });
-              currentBuffer = [];
-              currentThoughts = '';
-            }
-            currentRole = 'assistant';
-          } else {
-            currentBuffer.push(line);
-          }
-        }
-        if (currentBuffer.length > 0 || currentThoughts) {
-          rawMsgs.push({
-            role: currentRole,
-            sender: currentRole === 'user' ? 'User' : 'Gemini',
-            text: cleanText(currentBuffer.join('\n')),
-            thoughts: cleanText(currentThoughts)
-          });
-        }
-        if (rawMsgs.length > 0) {
-          return { platform: 'Google AI Studio', title: cleanText(document.title.replace(' - Google AI Studio', '')) || 'Google AI Studio Prompt', messages: rawMsgs };
-        }
-      }
-
-      // Virtual-scroll sweeper for normal view
       const container = document.querySelector('ms-autoscroll-container, [class*="autoscroll"]');
       const collectedTurns = new Map();
 
@@ -572,33 +520,56 @@
           const thoughts = thinkEl ? cleanText(thinkEl.innerText) : '';
           if (thinkEl) thinkEl.remove();
 
-          let text = '';
-          const textareas = Array.from(clone.querySelectorAll('textarea'));
-          if (textareas.length > 0) {
-            text = textareas.map(t => t.value || t.innerText || '').filter(Boolean).join('\n\n').trim();
-          }
-          if (!text) {
-            text = clone.innerText ? clone.innerText.trim() : '';
-          }
-
-          const chips = Array.from(turn.querySelectorAll('mat-chip, [class*="chip"], [class*="pill"], [class*="attachment"]'));
-          if (chips.length > 0) {
-            const chipTexts = chips.map(c => `📎 [Pasted Attachment / File: ${cleanText(c.innerText)}]`).filter(Boolean).join('\n');
-            text = text ? `${text}\n\n${chipTexts}` : chipTexts;
-          }
-
           const roleAttr = (turn.getAttribute('data-turn-role') || turn.getAttribute('data-role') || '').toLowerCase();
-          const classStr = turn.className.toLowerCase();
+          const classStr = (turn.className || '').toLowerCase();
           const isUser = roleAttr.includes('user') || classStr.includes('user') ||
-                         !!turn.querySelector('.chat-turn-container.user, [data-turn-role="User"], .user-prompt-container');
+                         !!turn.querySelector('.user-prompt-container, .chat-turn-container.user, [data-turn-role="User"], .render.user');
+
+          let text = '';
+
+          if (isUser) {
+            const userPromptEl = clone.querySelector ? clone.querySelector('.user-prompt-container, [class*="user-prompt"]') : null;
+            const targetEl = (userPromptEl && typeof userPromptEl.querySelectorAll === 'function') ? userPromptEl : clone;
+
+            const textareas = (targetEl.querySelectorAll ? Array.from(targetEl.querySelectorAll('textarea')) : []);
+            if (textareas.length > 0) {
+              text = textareas.map(t => t.value || t.innerText || '').filter(Boolean).join('\n\n').trim();
+            }
+
+            if (!text && targetEl.querySelector) {
+              const chunkEl = targetEl.querySelector('ms-text-chunk, [class*="text-chunk"], ms-cmark-node, .cmark-node');
+              if (chunkEl) {
+                text = chunkEl.innerText ? chunkEl.innerText.trim() : '';
+              }
+            }
+
+            if (!text) {
+              text = targetEl.innerText ? targetEl.innerText.trim() : '';
+            }
+
+            const chips = (turn.querySelectorAll ? Array.from(turn.querySelectorAll('mat-chip, [class*="chip"], [class*="pill"], [class*="attachment"], [class*="file-token"]')) : []);
+            if (chips.length > 0) {
+              const chipTexts = chips.map(c => `📎 [Pasted Attachment / File: ${cleanText(c.innerText)}]`).filter(Boolean).join('\n');
+              text = text ? `${text}\n\n${chipTexts}` : chipTexts;
+            }
+          } else {
+            const textareas = (clone.querySelectorAll ? Array.from(clone.querySelectorAll('textarea')) : []);
+            if (textareas.length > 0) {
+              text = textareas.map(t => t.value || t.innerText || '').filter(Boolean).join('\n\n').trim();
+            }
+            if (!text) {
+              text = clone.innerText ? clone.innerText.trim() : '';
+            }
+          }
 
           let cleanBody = text
             .replace(/^(edit\s*|more_vert\s*)+/g, '')
             .replace(/^(User|Model)\s+\d{1,2}:\d{2}\s*(?:AM|PM)?\s*/gi, '')
+            .replace(/^(edit\s*|more_vert\s*)+/g, '')
             .trim();
 
           if (cleanBody || thoughts) {
-            const key = cleanBody.slice(0, 100) + '___' + thoughts.slice(0, 40);
+            const key = (isUser ? 'u_' : 'a_') + cleanBody.slice(0, 120) + '___' + thoughts.slice(0, 40);
             if (!collectedTurns.has(key)) {
               collectedTurns.set(key, {
                 role: isUser ? 'user' : 'assistant',
@@ -616,16 +587,16 @@
       if (container && container.scrollHeight > container.clientHeight * 1.5) {
         const sleep = ms => new Promise(r => setTimeout(r, ms));
         const totalHeight = container.scrollHeight;
-        const step = container.clientHeight * 0.75;
+        const step = Math.max(container.clientHeight * 1.5, 1200);
         const origScroll = container.scrollTop;
 
         container.scrollTop = 0;
-        await sleep(60);
+        await sleep(40);
         harvestTurns();
 
         for (let pos = step; pos <= totalHeight + step; pos += step) {
           container.scrollTop = pos;
-          await sleep(50);
+          await sleep(35);
           harvestTurns();
         }
 

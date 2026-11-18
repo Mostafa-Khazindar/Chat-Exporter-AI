@@ -476,140 +476,112 @@
   else if (host.includes("aistudio.google.com")) {
     conv.platform = "Google AI Studio";
 
-    // Strategy 1: Check if Raw Mode (ms-chunk-editor) is active
-    const chunkEditor = document.querySelector("ms-chunk-editor");
-    if (chunkEditor && chunkEditor.innerText && chunkEditor.innerText.length > 500) {
-      const rawText = clean(chunkEditor.innerText);
-      // If it contains Model/User turns, parse them
-      const rawLines = rawText.split("\n");
-      const messages = [];
-      let currentRole = "user";
-      let currentBuffer = [];
-      let currentThoughts = "";
+    const container = document.querySelector("ms-autoscroll-container, [class*='autoscroll']");
+    const collectedTurns = new Map();
 
-      for (const line of rawLines) {
-        if (/^(user|human)\b/i.test(line.trim()) || line.trim().startsWith("User ")) {
-          if (currentBuffer.length > 0 || currentThoughts) {
-            messages.push({
-              role: currentRole,
-              sender: currentRole === "user" ? "User" : "Gemini",
-              text: clean(currentBuffer.join("\n")),
-              thoughts: clean(currentThoughts)
-            });
-            currentBuffer = [];
-            currentThoughts = "";
+    function harvestTurns() {
+      // AI Studio turn hosts
+      const turns = Array.from(document.querySelectorAll("ms-chat-turn, [data-turn-role], .chat-turn-container"));
+      for (const turn of turns) {
+        // Clone turn for manipulation
+        const clone = turn.cloneNode(true);
+
+        // 1. Separate model thinking / thoughts
+        const thinkEl = clone.querySelector(".thought-container, [class*='thought'], [class*='think'], [class*='reason']");
+        const thoughts = thinkEl ? clean(thinkEl.innerText) : "";
+        if (thinkEl) thinkEl.remove();
+
+        // 2. Identify if this turn is user or model
+        const roleAttr = (turn.getAttribute("data-turn-role") || turn.getAttribute("data-role") || "").toLowerCase();
+        const classStr = (turn.className || "").toLowerCase();
+        const isUser = roleAttr.includes("user") || classStr.includes("user") ||
+                       !!turn.querySelector(".user-prompt-container, .chat-turn-container.user, [data-turn-role='User'], .render.user");
+
+        let text = "";
+
+        // 3. Extract text according to role
+        if (isUser) {
+          const userPromptEl = clone.querySelector ? clone.querySelector(".user-prompt-container, [class*='user-prompt']") : null;
+          const targetEl = (userPromptEl && typeof userPromptEl.querySelectorAll === "function") ? userPromptEl : clone;
+
+          const textareas = (targetEl.querySelectorAll ? Array.from(targetEl.querySelectorAll("textarea")) : []);
+          if (textareas.length > 0) {
+            text = textareas.map(t => t.value || t.innerText || "").filter(Boolean).join("\n\n").trim();
           }
-          currentRole = "user";
-        } else if (/^(model|gemini|assistant)\b/i.test(line.trim()) || line.trim().startsWith("Model ")) {
-          if (currentBuffer.length > 0 || currentThoughts) {
-            messages.push({
-              role: currentRole,
-              sender: currentRole === "user" ? "User" : "Gemini",
-              text: clean(currentBuffer.join("\n")),
-              thoughts: clean(currentThoughts)
-            });
-            currentBuffer = [];
-            currentThoughts = "";
+
+          if (!text && targetEl.querySelector) {
+            const chunkEl = targetEl.querySelector("ms-text-chunk, [class*='text-chunk'], ms-cmark-node, .cmark-node");
+            if (chunkEl) {
+              text = chunkEl.innerText ? chunkEl.innerText.trim() : "";
+            }
           }
-          currentRole = "assistant";
+
+          if (!text) {
+            text = targetEl.innerText ? targetEl.innerText.trim() : "";
+          }
+
+          const chips = (turn.querySelectorAll ? Array.from(turn.querySelectorAll("mat-chip, [class*='chip'], [class*='pill'], [class*='attachment'], [class*='file-token']")) : []);
+          if (chips.length > 0) {
+            const chipTexts = chips.map(c => `📎 [Pasted Attachment / File: ${clean(c.innerText)}]`).filter(Boolean).join("\n");
+            text = text ? `${text}\n\n${chipTexts}` : chipTexts;
+          }
         } else {
-          currentBuffer.push(line);
-        }
-      }
-      if (currentBuffer.length > 0 || currentThoughts) {
-        messages.push({
-          role: currentRole,
-          sender: currentRole === "user" ? "User" : "Gemini",
-          text: clean(currentBuffer.join("\n")),
-          thoughts: clean(currentThoughts)
-        });
-      }
-      if (messages.length > 0) {
-        conv.messages = messages;
-      }
-    }
-
-    // Strategy 2: Virtual-Scroll Sweep over ms-autoscroll-container
-    if (!conv.messages || conv.messages.length === 0) {
-      const container = document.querySelector("ms-autoscroll-container, [class*='autoscroll']");
-      const collectedTurns = new Map();
-
-      function harvestTurns() {
-        const turns = Array.from(document.querySelectorAll("ms-chat-turn, [data-turn-role], .chat-turn-container"));
-        for (const turn of turns) {
-          const clone = turn.cloneNode(true);
-          const thinkEl = clone.querySelector(".thought-container, [class*='thought'], [class*='think'], [class*='reason']");
-          const thoughts = thinkEl ? clean(thinkEl.innerText) : "";
-          if (thinkEl) thinkEl.remove();
-
-          let text = "";
-          const textareas = Array.from(clone.querySelectorAll("textarea"));
+          const textareas = (clone.querySelectorAll ? Array.from(clone.querySelectorAll("textarea")) : []);
           if (textareas.length > 0) {
             text = textareas.map(t => t.value || t.innerText || "").filter(Boolean).join("\n\n").trim();
           }
           if (!text) {
             text = clone.innerText ? clone.innerText.trim() : "";
           }
+        }
 
-          // Check for attached pasted documents/chips (e.g. 10,891 tokens paste)
-          const chips = Array.from(turn.querySelectorAll("mat-chip, [class*='chip'], [class*='pill'], [class*='attachment']"));
-          if (chips.length > 0) {
-            const chipTexts = chips.map(c => `📎 [Pasted Attachment / File: ${clean(c.innerText)}]`).filter(Boolean).join("\n");
-            text = text ? `${text}\n\n${chipTexts}` : chipTexts;
-          }
+        // 4. Clean UI artifacts (more_vert, edit, timestamps like User 2:21 PM)
+        let cleanBody = text
+          .replace(/^(edit\s*|more_vert\s*)+/g, "")
+          .replace(/^(User|Model)\s+\d{1,2}:\d{2}\s*(?:AM|PM)?\s*/gi, "")
+          .replace(/^(edit\s*|more_vert\s*)+/g, "")
+          .trim();
 
-          const roleAttr = (turn.getAttribute("data-turn-role") || turn.getAttribute("data-role") || "").toLowerCase();
-          const classStr = turn.className.toLowerCase();
-          const isUser = roleAttr.includes("user") || classStr.includes("user") ||
-                         !!turn.querySelector(".chat-turn-container.user, [data-turn-role='User'], .user-prompt-container");
-
-          // Clean UI artifacts (more_vert, edit, timestamps like User 2:21 PM)
-          let cleanBody = text
-            .replace(/^(edit\s*|more_vert\s*)+/g, "")
-            .replace(/^(User|Model)\s+\d{1,2}:\d{2}\s*(?:AM|PM)?\s*/gi, "")
-            .trim();
-
-          if (cleanBody || thoughts) {
-            const key = cleanBody.slice(0, 100) + "___" + thoughts.slice(0, 40);
-            if (!collectedTurns.has(key)) {
-              collectedTurns.set(key, {
-                role: isUser ? "user" : "assistant",
-                sender: isUser ? "User" : "Gemini",
-                text: cleanBody,
-                thoughts: thoughts
-              });
-            }
+        if (cleanBody || thoughts) {
+          const key = (isUser ? "u_" : "a_") + cleanBody.slice(0, 120) + "___" + thoughts.slice(0, 40);
+          if (!collectedTurns.has(key)) {
+            collectedTurns.set(key, {
+              role: isUser ? "user" : "assistant",
+              sender: isUser ? "User" : "Gemini",
+              text: cleanBody,
+              thoughts: thoughts
+            });
           }
         }
       }
+    }
 
+    harvestTurns();
+
+    // Fast-sweep virtual-scroll container if tall
+    if (container && container.scrollHeight > container.clientHeight * 1.5) {
+      const sleep = ms => new Promise(r => setTimeout(r, ms));
+      const totalHeight = container.scrollHeight;
+      const step = Math.max(container.clientHeight * 1.5, 1200);
+      const origScroll = container.scrollTop;
+
+      // Sweep from top to bottom
+      container.scrollTop = 0;
+      await sleep(40);
       harvestTurns();
 
-      // If virtualized with long scrollHeight, sweep container
-      if (container && container.scrollHeight > container.clientHeight * 1.5) {
-        const sleep = ms => new Promise(r => setTimeout(r, ms));
-        const totalHeight = container.scrollHeight;
-        const step = container.clientHeight * 0.75;
-        const origScroll = container.scrollTop;
-
-        // Sweep from top to bottom
-        container.scrollTop = 0;
-        await sleep(60);
+      for (let pos = step; pos <= totalHeight + step; pos += step) {
+        container.scrollTop = pos;
+        await sleep(35);
         harvestTurns();
-
-        for (let pos = step; pos <= totalHeight + step; pos += step) {
-          container.scrollTop = pos;
-          await sleep(50);
-          harvestTurns();
-        }
-
-        // Restore original scroll position
-        container.scrollTop = origScroll;
       }
 
-      if (collectedTurns.size > 0) {
-        conv.messages = Array.from(collectedTurns.values());
-      }
+      // Restore original scroll position
+      container.scrollTop = origScroll;
+    }
+
+    if (collectedTurns.size > 0) {
+      conv.messages = Array.from(collectedTurns.values());
     }
   }
 
