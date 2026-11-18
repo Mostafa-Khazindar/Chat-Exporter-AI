@@ -472,13 +472,67 @@
     }
   }
 
-  // 5. UNIVERSAL MULTI-STAGE DOM RECOVERY (Works on ANY AI chat platform)
+  // 5. GOOGLE AI STUDIO (aistudio.google.com)
+  else if (host.includes("aistudio.google.com")) {
+    conv.platform = "Google AI Studio";
+
+    function extractElementText(el) {
+      if (!el) return "";
+      const textareas = Array.from(el.querySelectorAll("textarea"));
+      if (textareas.length > 0) {
+        const val = textareas.map(t => t.value || t.innerText || "").filter(Boolean).join("\n\n");
+        if (val.trim()) return val.trim();
+      }
+      const editables = Array.from(el.querySelectorAll("[contenteditable='true']"));
+      if (editables.length > 0) {
+        const val = editables.map(ed => ed.innerText || "").filter(Boolean).join("\n\n");
+        if (val.trim()) return val.trim();
+      }
+      return el.innerText || "";
+    }
+
+    const turns = Array.from(document.querySelectorAll("ms-chat-turn, [data-turn-role], .chat-turn-container, ms-prompt-chunk"));
+    if (turns.length > 0) {
+      const messages = [];
+      turns.forEach((turn, idx) => {
+        const roleAttr = (turn.getAttribute("data-turn-role") || turn.getAttribute("data-role") || "").toLowerCase();
+        const classStr = turn.className.toLowerCase();
+        const isUser = roleAttr.includes("user") ||
+                       classStr.includes("user") ||
+                       !!turn.querySelector(".chat-turn-container.user, .turn-header.user, [data-turn-role='User'], .user");
+
+        const clone = turn.cloneNode(true);
+        const thinkEl = clone.querySelector(".thought-container, [class*='thought'], [class*='think'], [class*='reason']");
+        const thoughts = thinkEl ? clean(thinkEl.innerText) : "";
+        if (thinkEl) thinkEl.remove();
+
+        const text = clean(extractElementText(clone));
+        if (text || thoughts) {
+          messages.push({
+            role: isUser ? "user" : "assistant",
+            sender: isUser ? "User" : "Gemini",
+            text: text,
+            thoughts: thoughts
+          });
+        }
+      });
+
+      if (messages.length > 0) {
+        conv.messages = messages;
+      }
+    }
+  }
+
+  // 6. UNIVERSAL MULTI-STAGE DOM RECOVERY (Works on ANY AI chat platform)
   if (!conv.messages || conv.messages.length === 0) {
     // Stage A: High-confidence conversational turn containers
     const turnSelectors = [
+      "ms-chat-turn",
+      "ms-prompt-chunk",
       "conversation-turn",
       "article",
       "[data-role]",
+      "[data-turn-role]",
       "[data-message-author-role]",
       "[data-testid*='message']",
       "[data-testid*='chat']",
@@ -504,20 +558,35 @@
 
     if (turns.length > 0) {
       conv.messages = turns.map(turn => {
-        const roleAttr = (turn.getAttribute("data-role") || turn.getAttribute("data-message-author-role") || turn.getAttribute("data-author") || "").toLowerCase();
+        const roleAttr = (turn.getAttribute("data-turn-role") || turn.getAttribute("data-role") || turn.getAttribute("data-message-author-role") || turn.getAttribute("data-author") || "").toLowerCase();
         const classStr = turn.className.toLowerCase();
         const isUser = roleAttr.includes("user") || roleAttr.includes("human") ||
                        classStr.includes("user") || classStr.includes("human") || classStr.includes("question") || classStr.includes("prompt") ||
-                       !!turn.querySelector("[class*='user'], [class*='human'], [class*='question']");
+                       !!turn.querySelector("[class*='user'], [class*='human'], [class*='question'], [data-turn-role='User'], textarea");
 
-        const thinkEl = turn.querySelector(".ds-think, [class*='think'], [class*='reason']");
+        const thinkEl = turn.querySelector(".ds-think, [class*='think'], [class*='reason'], [class*='thought']");
         const thoughts = thinkEl ? clean(thinkEl.innerText) : "";
 
         const clone = turn.cloneNode(true);
-        const cThink = clone.querySelector(".ds-think, [class*='think'], [class*='reason']");
+        const cThink = clone.querySelector(".ds-think, [class*='think'], [class*='reason'], [class*='thought']");
         if (cThink) cThink.remove();
 
-        const text = clean(clone.innerText);
+        // Extract text from textareas or contenteditables if present, otherwise innerText
+        let text = "";
+        const textareas = Array.from(clone.querySelectorAll("textarea"));
+        if (textareas.length > 0) {
+          text = clean(textareas.map(t => t.value || t.innerText || "").filter(Boolean).join("\n\n"));
+        }
+        if (!text) {
+          const editables = Array.from(clone.querySelectorAll("[contenteditable='true']"));
+          if (editables.length > 0) {
+            text = clean(editables.map(ed => ed.innerText || "").filter(Boolean).join("\n\n"));
+          }
+        }
+        if (!text) {
+          text = clean(clone.innerText);
+        }
+
         return (text || thoughts) ? {
           role: isUser ? "user" : "assistant",
           sender: isUser ? "User" : (conv.platform || "Assistant"),

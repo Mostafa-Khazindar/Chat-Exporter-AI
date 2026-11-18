@@ -205,6 +205,58 @@ async function runAsyncTests() {
   assert(Exporter.Adapters.glm.matches('chat.z.ai'), 'GLM adapter matches chat.z.ai');
   assert(Exporter.Adapters.glm.matches('bigmodel.cn'), 'GLM adapter matches bigmodel.cn');
 
+  // 2.5 Google AI Studio Adapter Verification & Textarea Extraction Simulation
+  assert(Exporter.Adapters.gemini !== undefined, 'Gemini/AI Studio adapter is registered in Universal AI Exporter');
+  assert(Exporter.Adapters.gemini.matches('gemini.google.com'), 'Gemini adapter matches gemini.google.com');
+  assert(Exporter.Adapters.gemini.matches('aistudio.google.com'), 'Gemini adapter matches aistudio.google.com');
+
+  // Mock AI Studio DOM
+  expContext.location = { hostname: 'aistudio.google.com', pathname: '/prompts/prompt-12345' };
+  expContext.document = {
+    title: 'Code Refactor Project - Google AI Studio',
+    querySelectorAll: (sel) => {
+      if (sel.includes('ms-chat-turn') || sel.includes('data-turn-role')) {
+        return [
+          {
+            getAttribute: (attr) => attr === 'data-turn-role' ? 'User' : null,
+            className: 'chat-turn-container user',
+            querySelectorAll: (subSel) => {
+              if (subSel === 'textarea') {
+                return [{ value: 'Write a unit test for my API' }];
+              }
+              if (subSel === '[contenteditable="true"]') return [];
+              return [];
+            },
+            querySelector: (subSel) => {
+              if (subSel.includes('user')) return true;
+              return null;
+            },
+            cloneNode: function() { return this; },
+            innerText: ''
+          },
+          {
+            getAttribute: (attr) => attr === 'data-turn-role' ? 'Model' : null,
+            className: 'chat-turn-container model',
+            querySelectorAll: (subSel) => [],
+            querySelector: (subSel) => {
+              if (subSel.includes('thought')) return null;
+              return null;
+            },
+            cloneNode: function() { return this; },
+            innerText: 'Here is the comprehensive test suite using jest.'
+          }
+        ];
+      }
+      return [];
+    }
+  };
+
+  const aiStudioResult = await Exporter.Adapters.gemini.extract();
+  assert(aiStudioResult && aiStudioResult.platform === 'Google AI Studio', 'Google AI Studio platform recognized correctly');
+  assert(aiStudioResult.messages.length === 2, 'AI Studio extracted both user and assistant turns');
+  assert(aiStudioResult.messages[0].role === 'user' && aiStudioResult.messages[0].text === 'Write a unit test for my API', 'AI Studio successfully extracted user input from textarea value');
+  assert(aiStudioResult.messages[1].role === 'assistant' && aiStudioResult.messages[1].text.includes('Here is the comprehensive test suite'), 'AI Studio successfully extracted assistant response');
+
   // -------------------------------------------------------------
   // TEST 3: File Syntax & Bundle Verification
   // -------------------------------------------------------------

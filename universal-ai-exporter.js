@@ -677,24 +677,93 @@
     },
 
     // ------------------------------------------
-    // GOOGLE GEMINI (gemini.google.com)
+    // GOOGLE GEMINI & AI STUDIO (gemini.google.com & aistudio.google.com)
     // ------------------------------------------
     gemini: {
       name: 'Google Gemini',
-      matches: () => location.hostname.includes('gemini.google.com'),
+      matches: (h) => {
+        const host = h || (typeof location !== 'undefined' ? location.hostname : '');
+        return host.includes('gemini.google.com') || host.includes('aistudio.google.com');
+      },
       async extract() {
+        const host = typeof location !== 'undefined' ? location.hostname : '';
+        const isAIStudio = host.includes('aistudio.google.com');
+
+        // Google AI Studio specific handling (handles textareas, chunks, and turns)
+        if (isAIStudio) {
+          function extractElementText(el) {
+            if (!el) return '';
+            const textareas = Array.from(el.querySelectorAll('textarea'));
+            if (textareas.length > 0) {
+              const val = textareas.map(t => t.value || t.innerText || '').filter(Boolean).join('\n\n');
+              if (val.trim()) return val.trim();
+            }
+            const editables = Array.from(el.querySelectorAll('[contenteditable="true"]'));
+            if (editables.length > 0) {
+              const val = editables.map(ed => ed.innerText || '').filter(Boolean).join('\n\n');
+              if (val.trim()) return val.trim();
+            }
+            return el.innerText || '';
+          }
+
+          const turns = Array.from(document.querySelectorAll('ms-chat-turn, [data-turn-role], .chat-turn-container, ms-prompt-chunk'));
+          if (turns.length > 0) {
+            const messages = [];
+            turns.forEach((turn, idx) => {
+              const roleAttr = (turn.getAttribute('data-turn-role') || turn.getAttribute('data-role') || '').toLowerCase();
+              const classStr = turn.className.toLowerCase();
+              const isUser = roleAttr.includes('user') ||
+                             classStr.includes('user') ||
+                             !!turn.querySelector('.chat-turn-container.user, .turn-header.user, [data-turn-role="User"], .user');
+
+              const clone = turn.cloneNode(true);
+              const thinkEl = clone.querySelector('.thought-container, [class*="thought"], [class*="think"], [class*="reason"]');
+              const thoughts = thinkEl ? cleanText(thinkEl.innerText) : '';
+              if (thinkEl) thinkEl.remove();
+
+              const text = cleanText(extractElementText(clone));
+              if (text || thoughts) {
+                messages.push({
+                  index: idx,
+                  role: isUser ? 'user' : 'assistant',
+                  sender: isUser ? 'User' : 'Gemini',
+                  text,
+                  thoughts,
+                  timestamp: null
+                });
+              }
+            });
+
+            if (messages.length > 0) {
+              return {
+                platform: 'Google AI Studio',
+                title: cleanText(document.title.replace(' - Google AI Studio', '')) || 'Google AI Studio Prompt',
+                id: location.pathname.split('/').pop(),
+                messages
+              };
+            }
+          }
+        }
+
+        // Standard Gemini handling
         const turns = Array.from(document.querySelectorAll('conversation-turn, .conversation-container > *, .chat-history > *'));
         const messages = [];
         if (turns.length > 0) {
           turns.forEach((turn, idx) => {
             const isUser = !!turn.querySelector('user-query, .query-text, [class*="user"]');
             const textEl = turn.querySelector('.query-content, .markdown, message-content, [class*="text-content"]') || turn;
-            const text = cleanText(textEl.innerText);
+            let text = '';
+            const textareas = Array.from(textEl.querySelectorAll('textarea'));
+            if (textareas.length > 0) {
+              text = cleanText(textareas.map(t => t.value || t.innerText || '').filter(Boolean).join('\n\n'));
+            }
+            if (!text) text = cleanText(textEl.innerText);
+
             if (text) {
               messages.push({
                 index: idx,
                 role: isUser ? 'user' : 'assistant',
-                sender: isUser ? 'User' : 'Gemini',
+                sender: isUser ? 'User' : (isAIStudio ? 'Google AI Studio' : 'Gemini'),
                 text,
                 timestamp: null
               });
@@ -703,10 +772,10 @@
         }
 
         return {
-          platform: 'Google Gemini',
-          title: cleanText(document.title.replace(' - Gemini', '')) || 'Gemini Conversation',
+          platform: isAIStudio ? 'Google AI Studio' : 'Google Gemini',
+          title: cleanText(document.title.replace(' - Gemini', '').replace(' - Google AI Studio', '')) || (isAIStudio ? 'AI Studio Prompt' : 'Gemini Conversation'),
           id: location.pathname.split('/').pop(),
-          messages: messages.length ? messages : (await Adapters.generic.extractFromDOM({ platform: 'Google Gemini' })).messages
+          messages: messages.length ? messages : (await Adapters.generic.extractFromDOM({ platform: isAIStudio ? 'Google AI Studio' : 'Google Gemini' })).messages
         };
       }
     },
@@ -800,9 +869,12 @@
 
         // Stage A: High-confidence conversational turn containers
         const turnSelectors = [
+          "ms-chat-turn",
+          "ms-prompt-chunk",
           "conversation-turn",
           "article",
           "[data-role]",
+          "[data-turn-role]",
           "[data-message-author-role]",
           "[data-testid*='message']",
           "[data-testid*='chat']",
@@ -827,20 +899,34 @@
 
         if (turns.length > 0) {
           messages = turns.map(turn => {
-            const roleAttr = (turn.getAttribute("data-role") || turn.getAttribute("data-message-author-role") || turn.getAttribute("data-author") || "").toLowerCase();
+            const roleAttr = (turn.getAttribute("data-turn-role") || turn.getAttribute("data-role") || turn.getAttribute("data-message-author-role") || turn.getAttribute("data-author") || "").toLowerCase();
             const classStr = turn.className.toLowerCase();
             const isUser = roleAttr.includes("user") || roleAttr.includes("human") ||
                            classStr.includes("user") || classStr.includes("human") || classStr.includes("question") || classStr.includes("prompt") ||
-                           !!turn.querySelector("[class*='user'], [class*='human'], [class*='question']");
+                           !!turn.querySelector("[class*='user'], [class*='human'], [class*='question'], [data-turn-role='User'], textarea");
 
-            const thinkEl = turn.querySelector(".ds-think, [class*='think'], [class*='reason']");
+            const thinkEl = turn.querySelector(".ds-think, [class*='think'], [class*='reason'], [class*='thought']");
             const thoughts = thinkEl ? cleanText(thinkEl.innerText) : "";
 
             const clone = turn.cloneNode(true);
-            const cThink = clone.querySelector(".ds-think, [class*='think'], [class*='reason']");
+            const cThink = clone.querySelector(".ds-think, [class*='think'], [class*='reason'], [class*='thought']");
             if (cThink) cThink.remove();
 
-            const text = cleanText(clone.innerText);
+            let text = "";
+            const textareas = Array.from(clone.querySelectorAll("textarea"));
+            if (textareas.length > 0) {
+              text = cleanText(textareas.map(t => t.value || t.innerText || "").filter(Boolean).join("\n\n"));
+            }
+            if (!text) {
+              const editables = Array.from(clone.querySelectorAll("[contenteditable='true']"));
+              if (editables.length > 0) {
+                text = cleanText(editables.map(ed => ed.innerText || "").filter(Boolean).join("\n\n"));
+              }
+            }
+            if (!text) {
+              text = cleanText(clone.innerText);
+            }
+
             return (text || thoughts) ? {
               role: isUser ? 'user' : 'assistant',
               sender: isUser ? 'User' : platformName,

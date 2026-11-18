@@ -8,6 +8,7 @@
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
 // @match        https://gemini.google.com/*
+// @match        https://aistudio.google.com/*
 // @match        https://chat.deepseek.com/*
 // @match        https://www.perplexity.ai/*
 // @match        https://perplexity.ai/*
@@ -506,11 +507,63 @@
       }
     }
 
-    // 5. UNIVERSAL MULTI-STAGE DOM RECOVERY
+    // 5. GOOGLE AI STUDIO (aistudio.google.com)
+    if (host.includes('aistudio.google.com')) {
+      function extractElementText(el) {
+        if (!el) return '';
+        const textareas = Array.from(el.querySelectorAll('textarea'));
+        if (textareas.length > 0) {
+          const val = textareas.map(t => t.value || t.innerText || '').filter(Boolean).join('\n\n');
+          if (val.trim()) return val.trim();
+        }
+        const editables = Array.from(el.querySelectorAll('[contenteditable="true"]'));
+        if (editables.length > 0) {
+          const val = editables.map(ed => ed.innerText || '').filter(Boolean).join('\n\n');
+          if (val.trim()) return val.trim();
+        }
+        return el.innerText || '';
+      }
+
+      const turns = Array.from(document.querySelectorAll('ms-chat-turn, [data-turn-role], .chat-turn-container, ms-prompt-chunk'));
+      if (turns.length > 0) {
+        const msgs = [];
+        turns.forEach(turn => {
+          const roleAttr = (turn.getAttribute('data-turn-role') || turn.getAttribute('data-role') || '').toLowerCase();
+          const classStr = turn.className.toLowerCase();
+          const isUser = roleAttr.includes('user') ||
+                         classStr.includes('user') ||
+                         !!turn.querySelector('.chat-turn-container.user, .turn-header.user, [data-turn-role="User"], .user');
+
+          const clone = turn.cloneNode(true);
+          const thinkEl = clone.querySelector('.thought-container, [class*="thought"], [class*="think"], [class*="reason"]');
+          const thoughts = thinkEl ? cleanText(thinkEl.innerText) : '';
+          if (thinkEl) thinkEl.remove();
+
+          const text = cleanText(extractElementText(clone));
+          if (text || thoughts) {
+            msgs.push({
+              role: isUser ? 'user' : 'assistant',
+              sender: isUser ? 'User' : 'Gemini',
+              text,
+              thoughts
+            });
+          }
+        });
+
+        if (msgs.length > 0) {
+          return { platform: 'Google AI Studio', title: cleanText(document.title.replace(' - Google AI Studio', '')) || 'Google AI Studio Prompt', messages: msgs };
+        }
+      }
+    }
+
+    // 6. UNIVERSAL MULTI-STAGE DOM RECOVERY
     const turnSelectors = [
+      "ms-chat-turn",
+      "ms-prompt-chunk",
       "conversation-turn",
       "article",
       "[data-role]",
+      "[data-turn-role]",
       "[data-message-author-role]",
       "[data-testid*='message']",
       "[data-testid*='chat']",
@@ -535,14 +588,37 @@
 
     if (turns.length > 0) {
       messages = turns.map(turn => {
-        const role = (turn.getAttribute('data-role') || turn.getAttribute('data-message-author-role') || turn.getAttribute('data-author') || '').toLowerCase();
+        const role = (turn.getAttribute('data-turn-role') || turn.getAttribute('data-role') || turn.getAttribute('data-message-author-role') || turn.getAttribute('data-author') || '').toLowerCase();
         const classStr = turn.className.toLowerCase();
-        const isUser = role.includes('user') || role.includes('human') || classStr.includes('user') || classStr.includes('human') || classStr.includes('question') || !!turn.querySelector("[class*='user'], [class*='human']");
-        const text = cleanText(turn.innerText);
-        return text ? {
+        const isUser = role.includes('user') || role.includes('human') || classStr.includes('user') || classStr.includes('human') || classStr.includes('question') || !!turn.querySelector("[class*='user'], [class*='human'], [data-turn-role='User'], textarea");
+
+        const thinkEl = turn.querySelector(".ds-think, [class*='think'], [class*='reason'], [class*='thought']");
+        const thoughts = thinkEl ? cleanText(thinkEl.innerText) : '';
+
+        const clone = turn.cloneNode(true);
+        const cThink = clone.querySelector(".ds-think, [class*='think'], [class*='reason'], [class*='thought']");
+        if (cThink) cThink.remove();
+
+        let text = '';
+        const textareas = Array.from(clone.querySelectorAll("textarea"));
+        if (textareas.length > 0) {
+          text = cleanText(textareas.map(t => t.value || t.innerText || "").filter(Boolean).join("\n\n"));
+        }
+        if (!text) {
+          const editables = Array.from(clone.querySelectorAll("[contenteditable='true']"));
+          if (editables.length > 0) {
+            text = cleanText(editables.map(ed => ed.innerText || "").filter(Boolean).join("\n\n"));
+          }
+        }
+        if (!text) {
+          text = cleanText(clone.innerText);
+        }
+
+        return (text || thoughts) ? {
           role: isUser ? 'user' : 'assistant',
           sender: isUser ? 'User' : 'Assistant',
-          text
+          text,
+          thoughts
         } : null;
       }).filter(Boolean);
     }
