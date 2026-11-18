@@ -476,112 +476,171 @@
   else if (host.includes("aistudio.google.com")) {
     conv.platform = "Google AI Studio";
 
-    const container = document.querySelector("ms-autoscroll-container, [class*='autoscroll']");
-    const collectedTurns = new Map();
+    // Strategy 1: Accurate Parser for ms-chunk-editor (Full conversation in text)
+    const chunkEditor = document.querySelector("ms-chunk-editor");
+    if (chunkEditor && chunkEditor.innerText && chunkEditor.innerText.length > 500) {
+      const raw = chunkEditor.innerText;
+      const text = raw.replace(/[\u202f\u00a0]/g, " ").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+      const lines = text.split("\n");
+      const messages = [];
+      let currentRole = null;
+      let currentSender = "";
+      let currentLines = [];
 
-    function harvestTurns() {
-      // AI Studio turn hosts
-      const turns = Array.from(document.querySelectorAll("ms-chat-turn, [data-turn-role], .chat-turn-container"));
-      for (const turn of turns) {
-        // Clone turn for manipulation
-        const clone = turn.cloneNode(true);
+      function commitTurn() {
+        if (!currentRole || currentLines.length === 0) return;
+        let body = currentLines
+          .join("\n")
+          .replace(/^(edit\s*|more_vert\s*)+/gi, "")
+          .replace(/(edit\s*|more_vert\s*)+$/gi, "")
+          .replace(/\n(edit|more_vert)\n/gi, "\n")
+          .trim();
 
-        // 1. Separate model thinking / thoughts
-        const thinkEl = clone.querySelector(".thought-container, [class*='thought'], [class*='think'], [class*='reason']");
-        const thoughts = thinkEl ? clean(thinkEl.innerText) : "";
-        if (thinkEl) thinkEl.remove();
-
-        // 2. Identify if this turn is user or model
-        const roleAttr = (turn.getAttribute("data-turn-role") || turn.getAttribute("data-role") || "").toLowerCase();
-        const classStr = (turn.className || "").toLowerCase();
-        const isUser = roleAttr.includes("user") || classStr.includes("user") ||
-                       !!turn.querySelector(".user-prompt-container, .chat-turn-container.user, [data-turn-role='User'], .render.user");
-
-        let text = "";
-
-        // 3. Extract text according to role
-        if (isUser) {
-          const userPromptEl = clone.querySelector ? clone.querySelector(".user-prompt-container, [class*='user-prompt']") : null;
-          const targetEl = (userPromptEl && typeof userPromptEl.querySelectorAll === "function") ? userPromptEl : clone;
-
-          const textareas = (targetEl.querySelectorAll ? Array.from(targetEl.querySelectorAll("textarea")) : []);
-          if (textareas.length > 0) {
-            text = textareas.map(t => t.value || t.innerText || "").filter(Boolean).join("\n\n").trim();
+        let thoughts = "";
+        if (currentRole === "assistant") {
+          const thoughtMatch = body.match(/^Thoughts\s*\n\s*Expand to view model thoughts\s*\n\s*(?:chevron_right\s*\n)?([\s\S]*?)(?=\n###|\n```|\n[A-Z]|\n\n|$)/i);
+          if (thoughtMatch) {
+            thoughts = thoughtMatch[1].trim();
+            body = body.slice(thoughtMatch[0].length).trim();
           }
+        }
 
-          if (!text && targetEl.querySelector) {
-            const chunkEl = targetEl.querySelector("ms-text-chunk, [class*='text-chunk'], ms-cmark-node, .cmark-node");
-            if (chunkEl) {
-              text = chunkEl.innerText ? chunkEl.innerText.trim() : "";
+        if (body || thoughts) {
+          messages.push({
+            role: currentRole,
+            sender: currentSender,
+            text: clean(body),
+            thoughts: clean(thoughts)
+          });
+        }
+        currentLines = [];
+      }
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        const userMatch = trimmed.match(/^User\s+\d{1,2}:\d{2}\s*(?:AM|PM)?$/i);
+        const modelMatch = trimmed.match(/^Model\s+\d{1,2}:\d{2}\s*(?:AM|PM)?$/i);
+
+        if (userMatch) {
+          commitTurn();
+          currentRole = "user";
+          currentSender = "User";
+        } else if (modelMatch) {
+          commitTurn();
+          currentRole = "assistant";
+          currentSender = "Gemini";
+        } else {
+          if (currentRole) {
+            currentLines.push(line);
+          }
+        }
+      }
+      commitTurn();
+
+      if (messages.length > 0) {
+        conv.messages = messages;
+      }
+    }
+
+    // Strategy 2: Fallback to DOM Harvesting & Virtual-Scroll Sweeping
+    if (!conv.messages || conv.messages.length === 0) {
+      const container = document.querySelector("ms-autoscroll-container, [class*='autoscroll']");
+      const collectedTurns = new Map();
+
+      function harvestTurns() {
+        const turns = Array.from(document.querySelectorAll("ms-chat-turn, [data-turn-role], .chat-turn-container"));
+        for (const turn of turns) {
+          const clone = turn.cloneNode(true);
+          const thinkEl = clone.querySelector(".thought-container, [class*='thought'], [class*='think'], [class*='reason']");
+          const thoughts = thinkEl ? clean(thinkEl.innerText) : "";
+          if (thinkEl) thinkEl.remove();
+
+          const roleAttr = (turn.getAttribute("data-turn-role") || turn.getAttribute("data-role") || "").toLowerCase();
+          const classStr = (turn.className || "").toLowerCase();
+          const isUser = roleAttr.includes("user") || classStr.includes("user") ||
+                         !!turn.querySelector(".user-prompt-container, .chat-turn-container.user, [data-turn-role='User'], .render.user");
+
+          let text = "";
+
+          if (isUser) {
+            const userPromptEl = clone.querySelector ? clone.querySelector(".user-prompt-container, [class*='user-prompt']") : null;
+            const targetEl = (userPromptEl && typeof userPromptEl.querySelectorAll === "function") ? userPromptEl : clone;
+
+            const textareas = (targetEl.querySelectorAll ? Array.from(targetEl.querySelectorAll("textarea")) : []);
+            if (textareas.length > 0) {
+              text = textareas.map(t => t.value || t.innerText || "").filter(Boolean).join("\n\n").trim();
+            }
+
+            if (!text && targetEl.querySelector) {
+              const chunkEl = targetEl.querySelector("ms-text-chunk, [class*='text-chunk'], ms-cmark-node, .cmark-node");
+              if (chunkEl) {
+                text = chunkEl.innerText ? chunkEl.innerText.trim() : "";
+              }
+            }
+
+            if (!text) {
+              text = targetEl.innerText ? targetEl.innerText.trim() : "";
+            }
+
+            const chips = (turn.querySelectorAll ? Array.from(turn.querySelectorAll("mat-chip, [class*='chip'], [class*='pill'], [class*='attachment'], [class*='file-token']")) : []);
+            if (chips.length > 0) {
+              const chipTexts = chips.map(c => `📎 [Pasted Attachment / File: ${clean(c.innerText)}]`).filter(Boolean).join("\n");
+              text = text ? `${text}\n\n${chipTexts}` : chipTexts;
+            }
+          } else {
+            const textareas = (clone.querySelectorAll ? Array.from(clone.querySelectorAll("textarea")) : []);
+            if (textareas.length > 0) {
+              text = textareas.map(t => t.value || t.innerText || "").filter(Boolean).join("\n\n").trim();
+            }
+            if (!text) {
+              text = clone.innerText ? clone.innerText.trim() : "";
             }
           }
 
-          if (!text) {
-            text = targetEl.innerText ? targetEl.innerText.trim() : "";
-          }
+          let cleanBody = text
+            .replace(/^(edit\s*|more_vert\s*)+/g, "")
+            .replace(/^(User|Model)\s+\d{1,2}:\d{2}\s*(?:AM|PM)?\s*/gi, "")
+            .replace(/^(edit\s*|more_vert\s*)+/g, "")
+            .trim();
 
-          const chips = (turn.querySelectorAll ? Array.from(turn.querySelectorAll("mat-chip, [class*='chip'], [class*='pill'], [class*='attachment'], [class*='file-token']")) : []);
-          if (chips.length > 0) {
-            const chipTexts = chips.map(c => `📎 [Pasted Attachment / File: ${clean(c.innerText)}]`).filter(Boolean).join("\n");
-            text = text ? `${text}\n\n${chipTexts}` : chipTexts;
-          }
-        } else {
-          const textareas = (clone.querySelectorAll ? Array.from(clone.querySelectorAll("textarea")) : []);
-          if (textareas.length > 0) {
-            text = textareas.map(t => t.value || t.innerText || "").filter(Boolean).join("\n\n").trim();
-          }
-          if (!text) {
-            text = clone.innerText ? clone.innerText.trim() : "";
-          }
-        }
-
-        // 4. Clean UI artifacts (more_vert, edit, timestamps like User 2:21 PM)
-        let cleanBody = text
-          .replace(/^(edit\s*|more_vert\s*)+/g, "")
-          .replace(/^(User|Model)\s+\d{1,2}:\d{2}\s*(?:AM|PM)?\s*/gi, "")
-          .replace(/^(edit\s*|more_vert\s*)+/g, "")
-          .trim();
-
-        if (cleanBody || thoughts) {
-          const key = (isUser ? "u_" : "a_") + cleanBody.slice(0, 120) + "___" + thoughts.slice(0, 40);
-          if (!collectedTurns.has(key)) {
-            collectedTurns.set(key, {
-              role: isUser ? "user" : "assistant",
-              sender: isUser ? "User" : "Gemini",
-              text: cleanBody,
-              thoughts: thoughts
-            });
+          if (cleanBody || thoughts) {
+            const key = (isUser ? "u_" : "a_") + cleanBody.slice(0, 120) + "___" + thoughts.slice(0, 40);
+            if (!collectedTurns.has(key)) {
+              collectedTurns.set(key, {
+                role: isUser ? "user" : "assistant",
+                sender: isUser ? "User" : "Gemini",
+                text: cleanBody,
+                thoughts: thoughts
+              });
+            }
           }
         }
       }
-    }
 
-    harvestTurns();
-
-    // Fast-sweep virtual-scroll container if tall
-    if (container && container.scrollHeight > container.clientHeight * 1.5) {
-      const sleep = ms => new Promise(r => setTimeout(r, ms));
-      const totalHeight = container.scrollHeight;
-      const step = Math.max(container.clientHeight * 1.5, 1200);
-      const origScroll = container.scrollTop;
-
-      // Sweep from top to bottom
-      container.scrollTop = 0;
-      await sleep(40);
       harvestTurns();
 
-      for (let pos = step; pos <= totalHeight + step; pos += step) {
-        container.scrollTop = pos;
-        await sleep(35);
+      if (container && container.scrollHeight > container.clientHeight * 1.5) {
+        const sleep = ms => new Promise(r => setTimeout(r, ms));
+        const totalHeight = container.scrollHeight;
+        const step = Math.max(container.clientHeight * 1.5, 1200);
+        const origScroll = container.scrollTop;
+
+        container.scrollTop = 0;
+        await sleep(40);
         harvestTurns();
+
+        for (let pos = step; pos <= totalHeight + step; pos += step) {
+          container.scrollTop = pos;
+          await sleep(35);
+          harvestTurns();
+        }
+
+        container.scrollTop = origScroll;
       }
 
-      // Restore original scroll position
-      container.scrollTop = origScroll;
-    }
-
-    if (collectedTurns.size > 0) {
-      conv.messages = Array.from(collectedTurns.values());
+      if (collectedTurns.size > 0) {
+        conv.messages = Array.from(collectedTurns.values());
+      }
     }
   }
 

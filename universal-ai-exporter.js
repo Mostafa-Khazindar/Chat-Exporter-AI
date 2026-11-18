@@ -691,6 +691,80 @@
 
         // Google AI Studio specific handling (handles textareas, chunks, turns, and virtual scrolling)
         if (isAIStudio) {
+          // Strategy 1: Accurate Parser for ms-chunk-editor (Full conversation in text)
+          const chunkEditor = document.querySelector('ms-chunk-editor');
+          if (chunkEditor && chunkEditor.innerText && chunkEditor.innerText.length > 500) {
+            const raw = chunkEditor.innerText;
+            const text = raw.replace(/[\u202f\u00a0]/g, ' ').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+            const lines = text.split('\n');
+            const messages = [];
+            let currentRole = null;
+            let currentSender = '';
+            let currentLines = [];
+
+            function commitTurn() {
+              if (!currentRole || currentLines.length === 0) return;
+              let body = currentLines
+                .join('\n')
+                .replace(/^(edit\s*|more_vert\s*)+/gi, '')
+                .replace(/(edit\s*|more_vert\s*)+$/gi, '')
+                .replace(/\n(edit|more_vert)\n/gi, '\n')
+                .trim();
+
+              let thoughts = '';
+              if (currentRole === 'assistant') {
+                const thoughtMatch = body.match(/^Thoughts\s*\n\s*Expand to view model thoughts\s*\n\s*(?:chevron_right\s*\n)?([\s\S]*?)(?=\n###|\n```|\n[A-Z]|\n\n|$)/i);
+                if (thoughtMatch) {
+                  thoughts = thoughtMatch[1].trim();
+                  body = body.slice(thoughtMatch[0].length).trim();
+                }
+              }
+
+              if (body || thoughts) {
+                messages.push({
+                  index: messages.length,
+                  role: currentRole,
+                  sender: currentSender,
+                  text: cleanText(body),
+                  thoughts: cleanText(thoughts),
+                  timestamp: null
+                });
+              }
+              currentLines = [];
+            }
+
+            for (const line of lines) {
+              const trimmed = line.trim();
+              const userMatch = trimmed.match(/^User\s+\d{1,2}:\d{2}\s*(?:AM|PM)?$/i);
+              const modelMatch = trimmed.match(/^Model\s+\d{1,2}:\d{2}\s*(?:AM|PM)?$/i);
+
+              if (userMatch) {
+                commitTurn();
+                currentRole = 'user';
+                currentSender = 'User';
+              } else if (modelMatch) {
+                commitTurn();
+                currentRole = 'assistant';
+                currentSender = 'Gemini';
+              } else {
+                if (currentRole) {
+                  currentLines.push(line);
+                }
+              }
+            }
+            commitTurn();
+
+            if (messages.length > 0) {
+              return {
+                platform: 'Google AI Studio',
+                title: cleanText(document.title.replace(' - Google AI Studio', '')) || 'Google AI Studio Prompt',
+                id: location.pathname.split('/').pop(),
+                messages: messages
+              };
+            }
+          }
+
+          // Strategy 2: Fallback to DOM Harvesting & Virtual-Scroll Sweeping
           const container = document.querySelector('ms-autoscroll-container, [class*="autoscroll"]');
           const collectedTurns = new Map();
 
