@@ -214,6 +214,11 @@ async function runAsyncTests() {
   expContext.location = { hostname: 'aistudio.google.com', pathname: '/prompts/prompt-12345' };
   expContext.document = {
     title: 'Code Refactor Project - Google AI Studio',
+    querySelector: (sel) => {
+      if (sel === 'ms-chunk-editor') return null;
+      if (sel.includes('ms-autoscroll-container')) return { scrollHeight: 500, clientHeight: 500, scrollTop: 0 };
+      return null;
+    },
     querySelectorAll: (sel) => {
       if (sel.includes('ms-chat-turn') || sel.includes('data-turn-role')) {
         return [
